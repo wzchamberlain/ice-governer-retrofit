@@ -44,4 +44,4 @@ This variant of the schematic and pin planning uses the switch (SPDT) to signal 
 5. Second Order Reaction
 
 #### Schematic Plan
-![Schematic](./ice-governer-retrofit-Signaled-Shutoff.drawio.svg)
+![Schematic](./design/assets/ice-governer-retrofit-Signaled-Shutoff.drawio.svg)
