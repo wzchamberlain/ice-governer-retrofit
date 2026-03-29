@@ -15,12 +15,24 @@
 #define MIN_SERVO 7
 #define MAX_SERVO 15
 
+#define TARGET_DURATION 4166 // target duration of a spark cycle in ticks
+#define DIFFERENCE_MULTIPLIER 1
+#define DIFFERENCE_DIVISOR 1
+#define DERIVATIVE_MULTIPLIER 1
+#define DERIVATIVE_DIVISOR 1
+#define INTEGRAL_MULTIPLIER 1
+#define INTEGRAL_DIVISOR 1
+#define FINAL_BITSHIFT 24
+
 volatile uint8_t timer_rollover = 0; // used for time tracking.
 volatile bool timer_double_roll = false;
 volatile bool is_sleep_set = false;
 volatile uint8_t pos_pot_val = 128; // let pos_pot_val of 128 mark a target of 3600rpm (60Hz)
 volatile uint8_t int_pot_val = 128;
 volatile uint8_t der_pot_val = 128;
+volatile uint16_t last_duration = TARGET_DURATION;
+volatile uint16_t last_error = 0;
+volatile int32_t last_integral = 0;
 
 void setup_pins() {
     // Set up port and pins
@@ -57,7 +69,7 @@ void setup_timer() {
     TCCR0A &= ~_BV(WGM01);
     TCCR0B &= ~_BV(WGM02);
 
-    // 8x pre-scaler @ 1 MHz -> 7,500,000 tick/min | 125,000 tick/sec (2083.333333333 tick/60Hz)
+    // 8x pre-scaler @ 1 MHz -> 7,500,000 tick/min | 125,000 tick/sec (2083.333333333 tick/60Hz for 2 stroke, 4166.666666667 tick/30Hz for 4 stroke)
     TCCR0B &= ~_BV(CS02);
     TCCR0B |= _BV(CS01);
     TCCR0B &= ~_BV(CS00);
@@ -159,6 +171,10 @@ void set_throttle_by_uint8(uint8_t input) {
     OCR1A = new_val;
 }
 
+uint8_t get_throttle_as_uint8() {
+    return OCR1A;
+}
+
 void close_throttle() {
     OCR1A = MIN_SERVO;
 }
@@ -203,11 +219,28 @@ ISR (PCINT0_vect) {
             // clear timer so it can continue tracking
             timer_rollover = 0;
             TCNT0 = 0;
+            // calculate error
+            int32_t error = rotation_duration - TARGET_DURATION;
+            // calculate time delta
+            int32_t duration_delta = rotation_duration - last_duration;
             // find difference between counted and setpoint
-            int32_t speed_diff = rotation_duration - ((pos_pot_val * 2083) / 128); // ordering looks strange, but attiny only handles integers natively, so the ordering is set to prevent a fraction as in intermediate
-            // integral and derivative calcs here?
-
-
+            int32_t time_difference = error * pos_pot_val * DIFFERENCE_MULTIPLIER / (128 * DIFFERENCE_DIVISOR);
+            // find derivative
+            int32_t time_derivative = (error - last_error) * der_pot_val * DERIVATIVE_MULTIPLIER / (128 * duration_delta * DERIVATIVE_DIVISOR);
+            // find integral
+            int32_t time_integral = (last_integral + (error * duration_delta)) * int_pot_val * INTEGRAL_MULTIPLIER / (128 * INTEGRAL_DIVISOR);
+            int32_t pid_out = time_difference + time_derivative + time_integral;
+            uint8_t adjust = (pid_out < 0) ? ((-pid_out) >> FINAL_BITSHIFT) : (pid_out >> FINAL_BITSHIFT);
+            uint8_t current_throttle = get_throttle_as_uint8();
+            if (pid_out < 0 && adjust >= current_throttle) {
+                close_throttle();
+            } else if (pid_out < 0) {
+                set_throttle_by_uint8(current_throttle - adjust);
+            } else if (current_throttle >= current_throttle) {
+                wide_open_throttle();
+            } else {
+                set_throttle_by_uint8(current_throttle + adjust);
+            }
         }
     }
 }
@@ -249,7 +282,7 @@ int main(void) {
         ADCSRA |= _BV(ADSC);
 
         // check if sleep/shutdown commanded
-        if (pos_pot_val == 0) {
+        if (pos_pot_val < 2) {
             close_throttle(); // kill engine
             set_pin_ints_sleep();
             is_sleep_set = true;
